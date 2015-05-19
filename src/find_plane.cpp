@@ -7,6 +7,7 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
@@ -117,17 +118,6 @@ void publish_marker(float a, float b, float c, float d)
 	tf::Vector3 right_vector = norm.cross(up_vector);
 	right_vector.normalized();
 
-	/*
-	//tf::Quaternion q(right_vector, -1.0*acos(norm.dot(up_vector)));
-	//q.normalize();
-	
-	tf::Vector3 vec=up_vector.cross(norm);
-	vec.normalize();
-	tf::Quaternion q(vec[2],vec[0],vec[1],0);
-	q[3]=sqrt(2)+up_vector.dot(norm);
-	q.normalize();
-	*/
-
 	float cos_theta = norm.dot(up_vector);
 	float angle=acos(cos_theta);
 	tf::Vector3 vec = norm.cross(up_vector);
@@ -137,6 +127,8 @@ void publish_marker(float a, float b, float c, float d)
 	tf::Matrix3x3 m(q);
 	double roll, pitch, yaw;
 	m.getRPY(roll, pitch, yaw);
+
+	q.setEuler(0, roll, 0);
 
 	ROS_INFO_STREAM("roll : "<< roll << " pitch : "<< pitch << " yaw : "<<yaw);
 
