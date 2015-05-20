@@ -22,8 +22,11 @@
 
 // Source http://pointclouds.org/documentation/tutorials/cluster_extraction.php#cluster-extraction
 // Added cloud publishing and passThrough filter
+// This version is using path through filter before finding the ground, so we can restrict the ground finding area
 
 ros::Publisher cloud_filtered_pub;
+ros::Publisher cloud_plane_pub;
+ros::Publisher cloud_noground_pub;
 ros::Publisher cloud_cluster1_pub;
 ros::Publisher cloud_cluster2_pub;
 
@@ -33,65 +36,88 @@ void processCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>), cloud_f (new pcl::PointCloud<pcl::PointXYZ>);
   pcl::fromROSMsg(*cloud_msg, *cloud);
 
+
   // Create the filtering object: downsample the dataset using a leaf size of 1cm
   pcl::VoxelGrid<pcl::PointXYZ> vg;
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);
+  /*
   vg.setInputCloud (cloud);
   vg.setLeafSize (0.01f, 0.01f, 0.01f);
   vg.filter (*cloud_filtered);
   std::cout << "PointCloud after filtering has: " << cloud_filtered->points.size ()  << " data points." << std::endl; //*
+  */
 
   pcl::PassThrough<pcl::PointXYZ> pass;
+  /*
   pass.setInputCloud (cloud_filtered);
-  pass.setFilterFieldName ("y");
+  pass.setFilterFieldName ("z");  //Axes in camera_depth_optical_frame (Check in Rviz for orientation)
   pass.setFilterLimits (0.0, 4.5);
   //pass.setFilterLimitsNegative (true);
   pass.filter (*cloud_filtered);
+  */
+
+  // Reuse PassThrough filter but change Filter Limits
+  pass.setInputCloud (cloud); //cloud_filtered before
+  pass.setFilterFieldName("y");
+  pass.setFilterLimits (0.6, 2.);
+  pass.filter(*cloud_filtered);
+
+  // Convert to ROS data type
+  sensor_msgs::PointCloud2 cloud_filtered_msg;
+  pcl::toROSMsg(*cloud_filtered, cloud_filtered_msg);
+  cloud_filtered_pub.publish(cloud_filtered_msg);
 
   // Create the segmentation object for the planar model and set all the parameters
   pcl::SACSegmentation<pcl::PointXYZ> seg;
   pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
   pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_plane (new pcl::PointCloud<pcl::PointXYZ> ());
-  pcl::PCDWriter writer;
   seg.setOptimizeCoefficients (true);
   seg.setModelType (pcl::SACMODEL_PLANE);
   seg.setMethodType (pcl::SAC_RANSAC);
   seg.setMaxIterations (100);
   seg.setDistanceThreshold (0.05);
+  // Can be useful to directly to add more constraints to the segmentation
+  //     seg.setAxis(Eigen::Vector3f(0,0,1));
+  //     seg.setEpsAngle(m_groundFilterAngle);
+  seg.setInputCloud (cloud_filtered);
+  seg.segment (*inliers, *coefficients);
 
-  int i=0, nr_points = (int) cloud_filtered->points.size ();
-  while (cloud_filtered->points.size () > 0.6 * nr_points)
+  if (inliers->indices.size () == 0)
   {
-    // Segment the largest planar component from the remaining cloud
-    seg.setInputCloud (cloud_filtered);
-    seg.segment (*inliers, *coefficients);
-    if (inliers->indices.size () == 0)
-    {
-      std::cout << "Could not estimate a planar model for the given dataset." << std::endl;
-      break;
-    }
-
-    // Extract the planar inliers from the input cloud
-    pcl::ExtractIndices<pcl::PointXYZ> extract;
-    extract.setInputCloud (cloud_filtered);
-    extract.setIndices (inliers);
-    extract.setNegative (false);
-
-    // Get the points associated with the planar surface
-    extract.filter (*cloud_plane);
-    std::cout << "PointCloud representing the planar component: " << cloud_plane->points.size () << " data points." << std::endl;
-
-    // Remove the planar inliers, extract the rest
-    extract.setNegative (true);
-    extract.filter (*cloud_f);
-    *cloud_filtered = *cloud_f;
+    std::cout << "Could not estimate a planar model for the given dataset." << std::endl;
+  }
+  else if(inliers->indices.size () < 10000)
+  {
+    ROS_INFO("The plane found might not be the ground plane!");
   }
 
+  // Extract the planar inliers from the input cloud
+  pcl::ExtractIndices<pcl::PointXYZ> extract;
+  extract.setInputCloud (cloud);
+  extract.setIndices (inliers);
+  extract.setNegative (false);
+
+  // Get the points associated with the planar surface
+  extract.filter (*cloud_plane);
+  ROS_INFO_STREAM("PointCloud representing the planar component: " << cloud_plane->points.size () << " data points.");
+
   // Convert to ROS data type
-  sensor_msgs::PointCloud2 cloud_filtered_msg;
-  pcl::toROSMsg(*cloud_filtered, cloud_filtered_msg);
-  cloud_filtered_pub.publish(cloud_filtered_msg);
+  sensor_msgs::PointCloud2 cloud_plane_msg;
+  pcl::toROSMsg(*cloud_plane, cloud_plane_msg);
+  cloud_plane_pub.publish(cloud_plane_msg);
+
+  // Remove the planar inliers, extract the rest
+  extract.setNegative (true);
+  extract.filter (*cloud_f);
+  *cloud_filtered = *cloud_f;
+
+  // Convert to ROS data type
+  sensor_msgs::PointCloud2 cloud_noground_msg;
+  pcl::toROSMsg(*cloud_filtered, cloud_noground_msg);
+  cloud_noground_pub.publish(cloud_noground_msg);
+
+  /*
 
   // Creating the KdTree object for the search method of the extraction
   pcl::search::KdTree<pcl::PointXYZ>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZ>);
@@ -139,6 +165,7 @@ void processCloud(const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 
     j++;
   }
+  */
 
 }
 
@@ -151,6 +178,9 @@ int main (int argc, char** argv)
   ros::Subscriber sub = nh.subscribe<sensor_msgs::PointCloud2> ("/camera/depth/points", 1, processCloud);
 
   cloud_filtered_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_filtered", 1);
+
+  cloud_plane_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_plane", 1);
+  cloud_noground_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_noground", 1);
 
   cloud_cluster1_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_cluster1", 1);
   cloud_cluster2_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_cluster2", 1);
