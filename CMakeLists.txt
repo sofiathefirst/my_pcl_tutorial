@@ -171,6 +171,7 @@ add_executable(find_plane_v2 src/find_plane_v2.cpp)
 add_executable(cluster_extraction src/cluster_extraction.cpp)
 add_executable(cluster_kinect src/cluster_kinect.cpp)
 add_executable(cluster_kinect_v2 src/cluster_kinect_v2.cpp)
+add_executable(cluster_v2 src/cluster_v2.cpp)
 
 
 target_link_libraries(example ${catkin_LIBRARIES})
@@ -181,3 +182,4 @@ target_link_libraries(find_plane_v2 ${catkin_LIBRARIES})
 target_link_libraries(cluster_extraction ${catkin_LIBRARIES})
 target_link_libraries(cluster_kinect ${catkin_LIBRARIES})
 target_link_libraries(cluster_kinect_v2 ${catkin_LIBRARIES})
+target_link_libraries(cluster_v2 ${catkin_LIBRARIES})
