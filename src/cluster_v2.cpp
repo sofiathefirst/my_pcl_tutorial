@@ -24,6 +24,10 @@
 
 #include <pcl/common/centroid.h>
 
+#include <sstream>
+
+#include <boost/bind.hpp>
+
 // Source https://github.com/OctoMap/octomap_mapping/blob/indigo-devel/octomap_server/src/OctomapServer.cpp
 
 ros::Publisher cloud_filtered_pub;
@@ -33,7 +37,10 @@ ros::Publisher cloud_cluster1_pub;
 ros::Publisher cloud_cluster2_pub;
 ros::Publisher cloud_voxeled_pub;
 
+ros::Publisher cloud_array_pub[12];
+
 ros::Time last_time;
+float elapsed_min=0.2;
 
 namespace find_plane{
   typedef pcl::PointCloud<pcl::PointXYZ> PCLPointCloud;
@@ -46,8 +53,10 @@ void findClusters(const PCLPointCloud& pc);
 void processCloud(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg);
 
 void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg){
-  if(ros::Time::now().toSec()-last_time.toSec()>0.1)
+
+  if(ros::Time::now().toSec()-last_time.toSec()>elapsed_min)
   {
+    ROS_INFO("=== Process cloud ===");
     processCloud(cloud_msg);
 
     last_time=ros::Time::now();
@@ -95,7 +104,7 @@ void processCloud(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg)
   pcl::VoxelGrid<pcl::PointXYZ> vg;
   PCLPointCloud cloud_voxeled;
   vg.setInputCloud (pc.makeShared());
-  vg.setLeafSize (0.02f, 0.02f, 0.02f);
+  vg.setLeafSize (0.04f, 0.04f, 0.04f);
   vg.filter(cloud_voxeled);
 
   // Convert to ROS data type
@@ -117,7 +126,7 @@ void findClusters(const PCLPointCloud& pc)
 
   std::vector<pcl::PointIndices> cluster_indices;
   pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-  ec.setClusterTolerance (0.02); // 2cm
+  ec.setClusterTolerance (0.08); // 2cm
   ec.setMinClusterSize (100);
   //ec.setMaxClusterSize (1000000);
   ec.setSearchMethod (tree);
@@ -125,7 +134,7 @@ void findClusters(const PCLPointCloud& pc)
   ec.extract (cluster_indices);
 
   // Convert to ROS data type
-  sensor_msgs::PointCloud2 cloud_cluster_msg;
+  sensor_msgs::PointCloud2 cloud_cluster_msg = sensor_msgs::PointCloud2();
 
   int j = 0;
   for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it)
@@ -150,23 +159,20 @@ void findClusters(const PCLPointCloud& pc)
     //Eigen::Matrix<float,4,1> centroid;
     pcl::compute3DCentroid(*cloud_cluster, centroid);
     ROS_INFO_STREAM("Centroid center x: " << centroid[0] << " y : " << centroid[1] << "z : " << centroid[2]);
+    ROS_INFO_STREAM("Distance : " << sqrt(pow(centroid[0],2)+pow(centroid[0],2)+pow(centroid[0],2)) << " m");
 
-    if(j==0)
+    if(j<10)
     {
-      cloud_cluster1_pub.publish(cloud_cluster_msg);
-      ROS_INFO_STREAM("Published the Cluster: " << j << " Nb points : " << cloud_cluster->points.size () );
-    }
-    else if(j==1)
-    {
-      cloud_cluster2_pub.publish(cloud_cluster_msg);
-      ROS_INFO_STREAM("Published the Cluster: " << j << " Nb points : " << cloud_cluster->points.size () );
-    }
-    else if(j>2)
-    {
-      //ros::Publisher multi_pub();
+      cloud_array_pub[j].publish(cloud_cluster_msg);
     }
 
     j++;
+  }
+
+  //Send empty cloud for remaining clusters
+  for(int i=j;i<(sizeof(cloud_array_pub)/sizeof(*cloud_array_pub)) ;i++)
+  {
+    cloud_array_pub[i].publish(cloud_cluster_msg);
   }
 
 }
@@ -238,16 +244,23 @@ int main (int argc, char** argv)
 
   last_time=ros::Time::now();
 
+  ROS_INFO("Node initialized");
+
   ros::Subscriber sub = nh.subscribe<sensor_msgs::PointCloud2> ("/camera/depth/points", 1, cloudCallback);
 
   cloud_filtered_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_filtered", 1);
   cloud_nonground_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_nonground", 1);
   cloud_output_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_output", 1);
 
-  cloud_cluster1_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_cluster1", 1);
-  cloud_cluster2_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_cluster2", 1);
-
   cloud_voxeled_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_voxeled", 1);
+
+  for(int i = 0; i<(sizeof(cloud_array_pub)/sizeof(*cloud_array_pub)) ;i++)
+  {
+    std::ostringstream ss;
+    ss << i;
+    std::string topic_name = "cloud_cluster"+ss.str();
+    cloud_array_pub[i] = nh.advertise<sensor_msgs::PointCloud2>(topic_name, 1);
+  }
 
   // Spin
   ros::spin ();
