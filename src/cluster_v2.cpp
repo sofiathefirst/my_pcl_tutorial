@@ -1,7 +1,6 @@
 #include <ros/ros.h>
 #include <visualization_msgs/MarkerArray.h>
 #include <pcl_ros/transforms.h>
-
 #include <sensor_msgs/PointCloud2.h>
 
 #include <pcl/point_cloud.h>
@@ -26,21 +25,19 @@
 
 #include <sstream>
 
-#include <boost/bind.hpp>
-
-// Source https://github.com/OctoMap/octomap_mapping/blob/indigo-devel/octomap_server/src/OctomapServer.cpp
+// Could be improved by computing cloud in base_footprint for better understanding of obstacles
 
 ros::Publisher cloud_filtered_pub;
 ros::Publisher cloud_nonground_pub;
 ros::Publisher cloud_output_pub;
-ros::Publisher cloud_cluster1_pub;
-ros::Publisher cloud_cluster2_pub;
 ros::Publisher cloud_voxeled_pub;
-
 ros::Publisher cloud_array_pub[12];
+
+ros::Publisher vis_pub;
 
 ros::Time last_time;
 float elapsed_min=0.2;
+int cloud_skipped=0;
 
 namespace find_plane{
   typedef pcl::PointCloud<pcl::PointXYZ> PCLPointCloud;
@@ -51,15 +48,25 @@ using namespace find_plane;
 void filterGroundPlane(const PCLPointCloud& pc, PCLPointCloud& ground, PCLPointCloud& nonground); 
 void findClusters(const PCLPointCloud& pc);
 void processCloud(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg);
+void publish_center_marker(std::string name, float x, float y, float z);
+void publish_obstacle_marker(std::string name, float x_min, float x_max, float z_min);
+void delete_marker(std::string name);
+
 
 void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg){
 
   if(ros::Time::now().toSec()-last_time.toSec()>elapsed_min)
   {
+    ROS_INFO_STREAM("Cloud skipped : " << cloud_skipped);
+    cloud_skipped=0;
     ROS_INFO("=== Process cloud ===");
     processCloud(cloud_msg);
 
     last_time=ros::Time::now();
+  }
+  else
+  {
+    cloud_skipped++;
   }
 }
 
@@ -78,7 +85,6 @@ void processCloud(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg)
   PCLPointCloud pc_nonground; // everything else
   pass.setInputCloud(pc.makeShared());
   pass.filter(pc);
-
 
   filterGroundPlane(pc, pc_ground, pc_nonground);
 
@@ -104,12 +110,13 @@ void processCloud(const sensor_msgs::PointCloud2::ConstPtr& cloud_msg)
   pcl::VoxelGrid<pcl::PointXYZ> vg;
   PCLPointCloud cloud_voxeled;
   vg.setInputCloud (pc.makeShared());
-  vg.setLeafSize (0.04f, 0.04f, 0.04f);
+  float leafSize = 0.08;
+  vg.setLeafSize (leafSize, leafSize, leafSize);
   vg.filter(cloud_voxeled);
 
   // Convert to ROS data type
   sensor_msgs::PointCloud2 cloud_voxeled_msg;
-  pcl::toROSMsg(pc, cloud_voxeled_msg);
+  pcl::toROSMsg(cloud_voxeled, cloud_voxeled_msg);
   cloud_voxeled_pub.publish(cloud_voxeled_msg);
 
   findClusters(cloud_voxeled);
@@ -126,7 +133,7 @@ void findClusters(const PCLPointCloud& pc)
 
   std::vector<pcl::PointIndices> cluster_indices;
   pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-  ec.setClusterTolerance (0.08); // 2cm
+  ec.setClusterTolerance (0.12); // 2cm
   ec.setMinClusterSize (100);
   //ec.setMaxClusterSize (1000000);
   ec.setSearchMethod (tree);
@@ -159,20 +166,66 @@ void findClusters(const PCLPointCloud& pc)
     //Eigen::Matrix<float,4,1> centroid;
     pcl::compute3DCentroid(*cloud_cluster, centroid);
     ROS_INFO_STREAM("Centroid center x: " << centroid[0] << " y : " << centroid[1] << "z : " << centroid[2]);
-    ROS_INFO_STREAM("Distance : " << sqrt(pow(centroid[0],2)+pow(centroid[0],2)+pow(centroid[0],2)) << " m");
+    ROS_INFO_STREAM("Distance : " << sqrt(pow(centroid[0],2)+pow(centroid[1],2)+pow(centroid[2],2)) << " m");
 
-    if(j<10)
+    // Find cloud limits and make a box of it
+    float x_min = cloud_cluster->points[0].x;
+    float x_max = x_min;
+    float z_min = cloud_cluster->points[0].z;
+
+    for(int ind=1;ind<cloud_cluster->points.size();ind++)
+    {
+      float x = cloud_cluster->points[ind].x;
+      float y = cloud_cluster->points[ind].y;
+      float z = cloud_cluster->points[ind].z;
+
+      if(x<x_min)
+      {
+        x_min = x;
+      }
+
+      if(x>x_max)
+      {
+        x_max = x;
+      }
+
+      if(z<z_min)
+      {
+        z_min = z;
+      }
+    }
+
+    ROS_INFO_STREAM("x_min : " << x_min << " x_max : " << x_max << " z_min : " << z_min);
+
+    // Publish cloud if inside cloud_array_pub
+    if(j<(sizeof(cloud_array_pub)/sizeof(*cloud_array_pub)))
     {
       cloud_array_pub[j].publish(cloud_cluster_msg);
+      //Publish centroid center
+      std::ostringstream ss;
+      ss << j;
+      std::string center_name = "center_cluster_"+ss.str();
+      publish_center_marker(center_name, centroid[0], centroid[1], centroid[2]);
+
+      std::string box_name = "box_cluster_"+ss.str(); 
+      publish_obstacle_marker(box_name, x_min, x_max, z_min);
     }
 
     j++;
   }
 
-  //Send empty cloud for remaining clusters
+  //Send empty cloud for remaining clusters and delete markers
   for(int i=j;i<(sizeof(cloud_array_pub)/sizeof(*cloud_array_pub)) ;i++)
   {
     cloud_array_pub[i].publish(cloud_cluster_msg);
+
+    std::ostringstream ss;
+    ss << j;
+    std::string name = "center_cluster_"+ss.str();
+    delete_marker(name);
+
+    std::string box_name = "box_cluster_"+ss.str(); 
+    delete_marker(box_name);
   }
 
 }
@@ -236,6 +289,60 @@ void filterGroundPlane(const PCLPointCloud& pc, PCLPointCloud& ground, PCLPointC
     cloud_nonground_pub.publish(cloud_nonground_msg);
 }
 
+void publish_center_marker(std::string name, float x, float y, float z)
+{ 
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = "camera_depth_optical_frame";
+  marker.header.stamp = ros::Time();
+  marker.ns = name;
+  marker.id = 0;
+  marker.type = visualization_msgs::Marker::CUBE;
+  marker.action = visualization_msgs::Marker::ADD;
+
+  marker.pose.position.x = x;
+  marker.pose.position.y = y;
+  marker.pose.position.z = z;
+  marker.scale.x = 0.05;
+  marker.scale.y = 0.05;
+  marker.scale.z = 0.05;
+  marker.color.a = 1.0; // Don't forget to set the alpha!
+
+  vis_pub.publish(marker);
+}
+
+void publish_obstacle_marker(std::string name, float x_min, float x_max, float z_min)
+{
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = "camera_depth_optical_frame";
+  marker.header.stamp = ros::Time();
+  marker.ns = name;
+  marker.id = 0;
+  marker.type = visualization_msgs::Marker::CUBE;
+  marker.action = visualization_msgs::Marker::ADD;
+
+  float width = x_max - x_min;
+
+  marker.pose.position.x = x_min+width/2;
+  marker.pose.position.y = 0;
+  marker.pose.position.z = z_min;
+  marker.scale.x = width;
+  marker.scale.y = 2;
+  marker.scale.z = 0.05;
+  marker.color.a = 0.8; // Don't forget to set the alpha!
+
+  vis_pub.publish(marker);
+
+}
+
+void delete_marker(std::string name)
+{
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = "camera_depth_optical_frame";
+  marker.ns = name;
+  marker.action = visualization_msgs::Marker::DELETE;
+  vis_pub.publish(marker);
+}
+
 int main (int argc, char** argv)
 {
   // Initialize ROS
@@ -251,14 +358,16 @@ int main (int argc, char** argv)
   cloud_filtered_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_filtered", 1);
   cloud_nonground_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_nonground", 1);
   cloud_output_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_output", 1);
-
   cloud_voxeled_pub = nh.advertise<sensor_msgs::PointCloud2> ("cloud_voxeled", 1);
+
+  vis_pub = nh.advertise<visualization_msgs::Marker>("visualization_marker", 1);
+
 
   for(int i = 0; i<(sizeof(cloud_array_pub)/sizeof(*cloud_array_pub)) ;i++)
   {
     std::ostringstream ss;
     ss << i;
-    std::string topic_name = "cloud_cluster"+ss.str();
+    std::string topic_name = "cloud_cluster_"+ss.str();
     cloud_array_pub[i] = nh.advertise<sensor_msgs::PointCloud2>(topic_name, 1);
   }
 
